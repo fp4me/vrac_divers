@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset=utf-8 />
+<title>A File Display Demo</title>
+<script type="text/javascript">
+
+
+/////
+
+var saveAs = saveAs
+  // IE 10+ (native saveAs)
+  || (typeof navigator !== "undefined" &&
+      navigator.msSaveOrOpenBlob && navigator.msSaveOrOpenBlob.bind(navigator))
+  // Everyone else
+  || (function(view) {
+	"use strict";
+	// IE <10 is explicitly unsupported
+	if (typeof navigator !== "undefined" &&
+	    /MSIE [1-9]\./.test(navigator.userAgent)) {
+		return;
+	}
+	var
+		  doc = view.document
+		  // only get URL when necessary in case BlobBuilder.js hasn't overridden it yet
+		, get_URL = function() {
+			return view.URL || view.webkitURL || view;
+		}
+		, URL = view.URL || view.webkitURL || view
+		, save_link = doc.createElementNS("http://www.w3.org/1999/xhtml", "a")
+		, can_use_save_link = !view.externalHost && "download" in save_link
+		, click = function(node) {
+			var event = doc.createEvent("MouseEvents");
+			event.initMouseEvent(
+				"click", true, false, view, 0, 0, 0, 0, 0
+				, false, false, false, false, 0, null
+			);
+			node.dispatchEvent(event);
+		}
+		, webkit_req_fs = view.webkitRequestFileSystem
+		, req_fs = view.requestFileSystem || webkit_req_fs || view.mozRequestFileSystem
+		, throw_outside = function(ex) {
+			(view.setImmediate || view.setTimeout)(function() {
+				throw ex;
+			}, 0);
+		}
+		, force_saveable_type = "application/octet-stream"
+		, fs_min_size = 0
+		, deletion_queue = []
+		, process_deletion_queue = function() {
+			var i = deletion_queue.length;
+			while (i--) {
+				var file = deletion_queue[i];
+				if (typeof file === "string") { // file is an object URL
+					URL.revokeObjectURL(file);
+				} else { // file is a File
+					file.remove();
+				}
+			}
+			deletion_queue.length = 0; // clear queue
+		}
+		, dispatch = function(filesaver, event_types, event) {
+			event_types = [].concat(event_types);
+			var i = event_types.length;
+			while (i--) {
+				var listener = filesaver["on" + event_types[i]];
+				if (typeof listener === "function") {
+					try {
+						listener.call(filesaver, event || filesaver);
+					} catch (ex) {
+						throw_outside(ex);
+					}
+				}
+			}
+		}
+		, FileSaver = function(blob, name) {
+			// First try a.download, then web filesystem, then object URLs
+			var
+				  filesaver = this
+				, type = blob.type
+				, blob_changed = false
+				, object_url
+				, target_view
+				, get_object_url = function() {
+					var object_url = get_URL().createObjectURL(blob);
+					deletion_queue.push(object_url);
+					return object_url;
+				}
+				, dispatch_all = function() {
+					dispatch(filesaver, "writestart progress write writeend".split(" "));
+				}
+				// on any filesys errors revert to saving with object URLs
+				, fs_error = function() {
+					// don't create more object URLs than needed
+					if (blob_changed || !object_url) {
+						object_url = get_object_url(blob);
+					}
+					if (target_view) {
+						target_view.location.href = object_url;
+					} else {
+						window.open(object_url, "_blank");
+					}
+					filesaver.readyState = filesaver.DONE;
+					dispatch_all();
+				}
+				, abortable = function(func) {
+					return function() {
+						if (filesaver.readyState !== filesaver.DONE) {
+							return func.apply(this, arguments);
+						}
+					};
+				}
+				, create_if_not_found = {create: true, exclusive: false}
+				, slice
+			;
+			filesaver.readyState = filesaver.INIT;
+			if (!name) {
+				name = "download";
+			}
+			if (can_use_save_link) {
+				object_url = get_object_url(blob);
+				// FF for Android has a nasty garbage collection mechanism
+				// that turns all objects that are not pure javascript into 'deadObject'
+				// this means `doc` and `save_link` are unusable and need to be recreated
+				// `view` is usable though:
+				doc = view.document;
+				save_link = doc.createElementNS("http://www.w3.org/1999/xhtml", "a");
+				save_link.href = object_url;
+				save_link.download = name;
+				var event = doc.createEvent("MouseEvents");
+				event.initMouseEvent(
+					"click", true, false, view, 0, 0, 0, 0, 0
+					, false, false, false, false, 0, null
+				);
+				save_link.dispatchEvent(event);
+				filesaver.readyState = filesaver.DONE;
+				dispatch_all();
+				return;
+			}
+			// Object and web filesystem URLs have a problem saving in Google Chrome when
+			// viewed in a tab, so I force save with application/octet-stream
+			// http://code.google.com/p/chromium/issues/detail?id=91158
+			if (view.chrome && type && type !== force_saveable_type) {
+				slice = blob.slice || blob.webkitSlice;
+				blob = slice.call(blob, 0, blob.size, force_saveable_type);
+				blob_changed = true;
+			}
+			// Since I can't be sure that the guessed media type will trigger a download
+			// in WebKit, I append .download to the filename.
+			// https://bugs.webkit.org/show_bug.cgi?id=65440
+			if (webkit_req_fs && name !== "download") {
+				name += ".download";
+			}
+			if (type === force_saveable_type || webkit_req_fs) {
+				target_view = view;
+			}
+			if (!req_fs) {
+				fs_error();
+				return;
+			}
+			fs_min_size += blob.size;
+			req_fs(view.TEMPORARY, fs_min_size, abortable(function(fs) {
+				fs.root.getDirectory("saved", create_if_not_found, abortable(function(dir) {
+					var save = function() {
+						dir.getFile(name, create_if_not_found, abortable(function(file) {
+							file.createWriter(abortable(function(writer) {
+								writer.onwriteend = function(event) {
+									target_view.location.href = file.toURL();
+									deletion_queue.push(file);
+									filesaver.readyState = filesaver.DONE;
+									dispatch(filesaver, "writeend", event);
+								};
+								writer.onerror = function() {
+									var error = writer.error;
+									if (error.code !== error.ABORT_ERR) {
+										fs_error();
+									}
+								};
+								"writestart progress write abort".split(" ").forEach(function(event) {
+									writer["on" + event] = filesaver["on" + event];
+								});
+								writer.write(blob);
+								filesaver.abort = function() {
+									writer.abort();
+									filesaver.readyState = filesaver.DONE;
+								};
+								filesaver.readyState = filesaver.WRITING;
+							}), fs_error);
+						}), fs_error);
+					};
+					dir.getFile(name, {create: false}, abortable(function(file) {
+						// delete file if it already exists
+						file.remove();
+						save();
+					}), abortable(function(ex) {
+						if (ex.code === ex.NOT_FOUND_ERR) {
+							save();
+						} else {
+							fs_error();
+						}
+					}));
+				}), fs_error);
+			}), fs_error);
+		}
+		, FS_proto = FileSaver.prototype
+		, saveAs = function(blob, name) {
+			return new FileSaver(blob, name);
+		}
+	;
+	FS_proto.abort = function() {
+		var filesaver = this;
+		filesaver.readyState = filesaver.DONE;
+		dispatch(filesaver, "abort");
+	};
+	FS_proto.readyState = FS_proto.INIT = 0;
+	FS_proto.WRITING = 1;
+	FS_proto.DONE = 2;
+
+	FS_proto.error =
+	FS_proto.onwritestart =
+	FS_proto.onprogress =
+	FS_proto.onwrite =
+	FS_proto.onabort =
+	FS_proto.onerror =
+	FS_proto.onwriteend =
+		null;
+
+	view.addEventListener("unload", process_deletion_queue, false);
+	saveAs.unload = function() {
+		process_deletion_queue();
+		view.removeEventListener("unload", process_deletion_queue, false);
+	};
+	return saveAs;
+}(
+	   typeof self !== "undefined" && self
+	|| typeof window !== "undefined" && window
+	|| this.content
+));
+// `self` is undefined in Firefox for Android content script context
+// while `this` is nsIContentFrameMessageManager
+// with an attribute `content` that corresponds to the window
+
+if (typeof module !== "undefined" && module !== null) {
+  module.exports = saveAs;
+} else if ((typeof define !== "undefined" && define !== null) && (define.amd != null)) {
+  define([], function() {
+    return saveAs;
+  });
+}
+
+//////
+
+
+var lsize = 80;
+
+var  li1147FromLatin = [0x00, 0x01, 0x02, 0x03, 0x37, 0x2D, 0x2E, 0x2F, 0x16, 0x05, 0x25, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 
+                        0x10, 0x11, 0x12, 0x13, 0x3C, 0x3D, 0x32, 0x26, 0x18, 0x19, 0x3F, 0x27, 0x1C, 0x1D, 0x1E, 0x1F, 
+                        0x40, 0x4F, 0x7F, 0xB1, 0x5B, 0x6C, 0x50, 0x7D, 0x4D, 0x5D, 0x5C, 0x4E, 0x6B, 0x60, 0x4B, 0x61, 
+                        0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0x7A, 0x5E, 0x4C, 0x7E, 0x6E, 0x6F, 
+                        0x44, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 
+			0xD7, 0xD8, 0xD9, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0x90, 0x48, 0xB5, 0x5F, 0x6D, 
+			0xA0, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 
+			0x97, 0x98, 0x99, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0x51, 0xBB, 0x54, 0xBD, 0x07, 
+			0x20, 0x21, 0x22, 0x23, 0x24, 0x15, 0x06, 0x17, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x09, 0x0A, 0x1B, 
+			0x30, 0x31, 0x1A, 0x33, 0x34, 0x35, 0x36, 0x08, 0x38, 0x39, 0x3A, 0x3B, 0x04, 0x14, 0x3E, 0xFF, 
+			0x41, 0xAA, 0xB0, 0x7B, 0x9F, 0xB2, 0xDD, 0x5A, 0xA1, 0xB4, 0x9A, 0x8A, 0xBA, 0xCA, 0xAF, 0xBC, 
+			0x4A, 0x8F, 0xEA, 0xFA, 0xBE, 0x79, 0xB6, 0xB3, 0x9D, 0xDA, 0x9B, 0x8B, 0xB7, 0xB8, 0xB9, 0xAB, 
+			0x64, 0x65, 0x62, 0x66, 0x63, 0x67, 0x9E, 0x68, 0x74, 0x71, 0x72, 0x73, 0x78, 0x75, 0x76, 0x77, 
+			0xAC, 0x69, 0xED, 0xEE, 0xEB, 0xEF, 0xEC, 0xBF, 0x80, 0xFD, 0xFE, 0xFB, 0xFC, 0xAD, 0xAE, 0x59, 
+			0x7C, 0x45, 0x42, 0x46, 0x43, 0x47, 0x9C, 0xE0, 0xD0, 0xC0, 0x52, 0x53, 0x58, 0x55, 0x56, 0x57, 
+			0x8C, 0x49, 0xCD, 0xCE, 0xCB, 0xCF, 0xCC, 0xE1, 0x70, 0x6A, 0xDE, 0xDB, 0xDC, 0x8D, 0x8E, 0xDF]; 
+
+var  li1047ToLatin = [0x00,0x01,0x02,0x03,0x80,0x09,0x81,0x7F,0x82,0x83,0x84,0x0B,0x0C,0x0D,0x0E,0x0F
+		     ,0x10,0x11,0x12,0x13,0x86,0x85,0x08,0x87,0x18,0x19,0x88,0x89,0x1C,0x1D,0x1E,0x1F
+		     ,0x8A,0x8B,0x8C,0x8D,0x8E,0x0A,0x17,0x1B,0x8F,0x90,0x91,0x92,0x93,0x05,0x06,0x07
+		     ,0x94,0x95,0x16,0x96,0x97,0x98,0x99,0x04,0x9A,0x9B,0x9C,0x9D,0x14,0x15,0x9E,0x1A
+		     ,0x20,0xA0,0xE2,0xE4,0xE0,0xE1,0xE3,0xE5,0xE7,0xF1,0xA2,0x2E,0x3C,0x28,0x2B,0x7C
+		     ,0x26,0xE9,0xEA,0xEB,0xE8,0xED,0xEE,0xEF,0xEC,0xDF,0x21,0x24,0x2A,0x29,0x3B,0x5E
+		     ,0x2D,0x2F,0xC2,0xC4,0xC0,0xC1,0xC3,0xC5,0xC7,0xD1,0xA6,0x2C,0x25,0x5F,0x3E,0x3F
+		     ,0xF8,0xC9,0xCA,0xCB,0xC8,0xCD,0xCE,0xCF,0xCC,0x60,0x3A,0x23,0x40,0x27,0x3D,0x22
+		     ,0xD8,0x61,0x62,0x63,0x64,0x65,0x66,0x67,0x68,0x69,0xAB,0xBB,0xF0,0xFD,0xFE,0xB1
+		     ,0xB0,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70,0x71,0x72,0xAA,0xBA,0xE6,0xB8,0xC6,0xA4
+		     ,0xB5,0x7E,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0xA1,0xBF,0xD0,0x5B,0xDE,0xAE
+		     ,0xAC,0xA3,0xA5,0xB7,0xA9,0xA7,0xB6,0xBC,0xBD,0xBE,0xDD,0xA8,0xAF,0x5D,0xB4,0xD7
+		     ,0x7B,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0xAD,0xF4,0xF6,0xF2,0xF3,0xF5
+		     ,0x7D,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F,0x50,0x51,0x52,0xB9,0xFB,0xFC,0xF9,0xFA,0xFF
+		     ,0x5C,0xF7,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0xB2,0xD4,0xD6,0xD2,0xD3,0xD5
+		     ,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0xB3,0xDB,0xDC,0xD9,0xDA,0x9F];
+
+var li1147ToLatin = function() {
+	                          var newCharSet = Object.create(li1147FromLatin);
+                                  li1147FromLatin.forEach(function(elem,index) {
+				  		   newCharSet[elem] = index;
+			                         });
+				  return newCharSet;
+                                 }();
+		     	    
+
+var li1047FromLatin = function() {
+	                          var newCharSet = Object.create(li1047ToLatin);
+                                  li1047ToLatin.forEach(function(elem,index) {
+				  		   newCharSet[elem] = index;
+			                         });
+				  return newCharSet;
+                                 }();
+		     	     
+function printInfo() {
+	document.getElementById('info').textContent = li1047FromLatin.join('');
+	
+};
+
+
+if(window.FileReader) { 
+ var drop; 
+ addEventHandler(window, 'load', function() {
+    var status = document.getElementById('status');
+    drop   = document.getElementById('drop');
+    var list   = document.getElementById('list');
+  	
+    function cancel(e) {
+      if (e.preventDefault) { e.preventDefault(); }
+      return false;
+    }
+  
+    // Tells the browser that we *can* drop on this target
+    addEventHandler(drop, 'dragover', cancel);
+    addEventHandler(drop, 'dragenter', cancel);
+
+
+function str2ab(str) {
+       var buf = new ArrayBuffer(str.length); 
+       var bufView = new Uint8Array(buf);
+       for (var i=0, strLen=str.length; i<strLen; i++) {
+         bufView[i] = str.charCodeAt(i);
+       }
+       return bufView;
+     }
+
+/*Uint8Array.prototype.chunk = function (size) {
+
+        
+              if (this.length < size) { return [ this ] }
+              else  { 
+		     var t = this; 
+		     return (function() {
+				         [].unshift.call(this,t.subarray(0,size)); return this
+					}
+			    ).call(t.subarray(size).chunk(size));
+	      } 
+}*/
+
+Uint8Array.prototype.chunk = function (size) {
+
+              var twork = [];
+	      var ttodo = this;
+	      while (ttodo.length > size ) {
+	        var chk = ttodo.subarray(0,size);
+	   	twork.push(chk);
+                ttodo = ttodo.subarray(size);
+	      }
+	      if (ttodo.length>0) { twork.push(ttodo); }
+              return twork; 
+         }
+
+
+Uint8Array.prototype.convertFromZos = function() {
+	                                        var temp = new Uint8Array(this.length+2);
+	                                        for (var i=0; i<this.length;i++) {
+						 temp[i] = li1047ToLatin[this[i]];
+						 /*temp[i] = li1147ToLatin[this[i]];*/
+						}
+						temp[this.length]=13;
+						temp[this.length+1]=10;
+						return temp;
+						//return String.fromCharCode.apply(null, this);//this;
+                                               }
+
+Uint8Array.prototype.convertToZos = function() {
+	                                        
+	                                        for (var i=0; i<this.length;i++) {
+                                                  
+						 this[i] = li1047FromLatin[this[i]];
+						 /*this[i] = li1147FromLatin[this[i]];*/
+						}
+						return this;
+                                               }
+Uint8Array.prototype.pad = function(nb) {
+	                                        var paddedArray = new Uint8Array(lsize);
+	                                        paddedArray.set(this);
+	                                        for (var i=this.length; i<nb;i++) {
+						 paddedArray[i] = li1047FromLatin[" ".charCodeAt(0)];
+						 /*paddedArray[i] = li1147FromLatin[" ".charCodeAt(0)];*/
+						}
+						return paddedArray;
+                                               }
+
+
+addEventHandler(drop, 'drop', function (e) {
+  e = e || window.event; // get window.event if e argument missing (in IE)   
+  if (e.preventDefault) { e.preventDefault(); } // stops the browser from redirecting off to the image.
+
+  var dt    = e.dataTransfer;
+  var files = dt.files;
+  for (var i=0; i<files.length; i++) {
+    var file = files[i];
+    var reader = new FileReader();
+      
+    var conversion =  document.getElementById('convert').value;	
+    lsize = document.getElementById('lsize').value; 
+
+    if (conversion=='fromZos') {
+      reader.readAsArrayBuffer(file);
+    }
+     else {
+       reader.readAsText(file);
+     } 
+      
+    addEventHandler(reader, 'loadend', function(e, file) {
+
+    var newFile       = document.createElement('div');
+    newFile.innerHTML = 'Loaded : '+file.name+' size '+file.size+' B';
+    list.appendChild(newFile);  
+    var fileNumber = list.getElementsByTagName('div').length;
+    status.innerHTML = fileNumber < files.length 
+                     ? 'Loaded 100% of file '+fileNumber+' of '+files.length+'...' 
+                     : 'Done loading. processed '+fileNumber+' files.';
+
+    document.getElementById('info').textContent = ['file name:',file.name,' file size:', file.size].join('');
+
+    if (conversion=='fromZos') {
+      var bin           = new Uint8Array(this.result); 
+      var chunks        = bin.chunk(lsize); 
+      var lines         = chunks.map(function(e){return e.convertFromZos()});
+      //var bufferOut     = lines.join("\n"); 
+
+      var blob = new Blob(lines/*[bufferOut]*/,{type: 'text/plain;charset=iso-8859-1'});
+      saveAs(blob,[file.name,'.latin'].join(''));
+     }
+    else {
+	    var txt = this.result; 
+	    var re=/\r\n|\n\r|\n|\r/g;
+	    var lines = txt.replace(re,"\n").split("\n");
+
+            if (lines[lines.length-1].length == 0) lines.pop();
+
+	    var chunks = lines.map(function(elem){ return str2ab(elem) });
+	    var liness  = chunks.map(function(e){return e.convertToZos().pad(lsize)}); 
+
+            var blob = new Blob(liness);
+	    saveAs(blob,[file.name,'.zos'].join(''));
+
+            document.getElementById('info').textContent = ['file name:',file.name,' file size:', file.size,' ',liness[0].length].join('');
+
+	 }
+
+
+}.bindToEventHandler(file));
+  }
+  return false;
+});
+     
+Function.prototype.bindToEventHandler = function bindToEventHandler() {
+  var handler = this;
+  var boundParameters = Array.prototype.slice.call(arguments);
+  //create closure
+  return function(e) {
+      e = e || window.event; // get window.event if e argument missing (in IE)   
+      boundParameters.unshift(e);
+      handler.apply(this, boundParameters);
+  }
+};
+  });
+} else { 
+  document.getElementById('status').innerHTML = 'Your browser does not support the HTML5 FileReader.';
+}
+
+function addEventHandler(obj, evt, handler) {
+    if(obj.addEventListener) {
+        // W3C method
+        obj.addEventListener(evt, handler, false);
+    } else if(obj.attachEvent) {
+        // IE method.
+        obj.attachEvent('on'+evt, handler);
+    } else {
+        // Old school method.
+        obj['on'+evt] = handler;
+    }
+}
+
+
+</script>
+<style>
+#drop {
+  min-height: 150px;
+  width: 250px;
+  border: 1px solid blue;
+  margin: 10px;
+  padding: 10px;
+}
+</style>
+</head>
+<body onload="printInfo();">
+  <h1 align=center>A File Preview Demo</h1>
+  <DIV id="status">Drag the files from a folder to a selected area ...</DIV>
+
+ <select id="convert" name="convert">
+    <option value="fromZos">FromZos</option> 
+    <option value="toZos" selected>toZos</option>
+  </select>
+
+  <p> line size <input type="number" id="lsize" name="lsize" value=80> 
+  </p>
+
+  <DIV id="drop">Drop files here.</DIV>
+  
+  <DIV id="info"><DIV>
+  <DIV id="list"></DIV>
+</body>
+</html>
+
